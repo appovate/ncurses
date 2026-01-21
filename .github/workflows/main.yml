@@ -1,0 +1,89 @@
+name: Update Ncurses (Release)
+
+on:
+  schedule:
+    - cron: "0 0 * * 0"
+  workflow_dispatch:
+
+jobs:
+  release-ncurses:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install required tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget dpkg-dev rsync zip
+
+      - name: Detect latest Ncurses version
+        id: get_version
+        run: |
+          BASE_URL="https://grimler.se/termux-main/pool/main/n/ncurses/"
+          wget -qO- "$BASE_URL" \
+            | grep -o 'ncurses_[^"]*_aarch64.deb' \
+            | sort -V \
+            | tail -n1 > latest.txt
+
+          FILE=$(cat latest.txt)
+          VERSION=$(echo "$FILE" | sed -E 's/ncurses_([^_]*)_.*/\1/')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Download, normalize paths, and zip per-ABI
+        run: |
+          BASE_URL="https://grimler.se/termux-main/pool/main/n/ncurses/"
+          VERSION="${{ steps.get_version.outputs.version }}"
+
+          declare -A archs=(
+            [aarch64]=aarch64
+            [arm]=arm
+            [i686]=i686
+            [x86_64]=x86_64
+          )
+
+          rm -rf dist work
+          mkdir -p dist work
+
+          for arch in "${!archs[@]}"; do
+            DEB="ncurses_${VERSION}_${arch}.deb"
+            echo "Downloading $DEB"
+            wget -q "$BASE_URL$DEB" -O "$DEB"
+
+            # Extract deb
+            mkdir -p "work/$arch"
+            dpkg-deb -x "$DEB" "work/$arch"
+
+            # Create clean layout: usr/...
+            mkdir -p "dist/ncurses-$arch/usr"
+            rsync -a "work/$arch/data/data/com.termux/files/usr/" \
+                     "dist/ncurses-$arch/usr/"
+
+            # Zip per architecture
+            cd dist
+            zip -qr "ncurses-${VERSION}-${arch}.zip" "ncurses-$arch"
+            cd ..
+          done
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ncurses-${{ steps.get_version.outputs.version }}
+          name: Ncurses ${{ steps.get_version.outputs.version }}
+          body: |
+            Ncurses binaries built from Termux packages.
+
+            Path normalization applied:
+            - Removed /data/data/com.termux/files
+            - Root starts at /usr
+
+            Included architectures:
+            - aarch64
+            - arm
+            - i686
+            - x86_64
+          files: dist/*.zip
